@@ -53,7 +53,6 @@ pub fn all_language_settings<'a>(
 pub struct AllLanguageSettings {
     /// The inline completion settings.
     pub inline_completions: InlineCompletionSettings,
-    pub enable_runtimes: bool,
     defaults: LanguageSettings,
     languages: HashMap<Arc<str>, LanguageSettings>,
     pub(crate) file_types: HashMap<Arc<str>, Vec<String>>,
@@ -115,8 +114,6 @@ pub struct LanguageSettings {
     pub always_treat_brackets_as_autoclosed: bool,
     /// Which code actions to run on save
     pub code_actions_on_format: HashMap<String, bool>,
-    /// Whether to enable interactive runtimes for this language.
-    pub enable_runtimes: bool,
 }
 
 impl LanguageSettings {
@@ -622,7 +619,6 @@ impl settings::Settings for AllLanguageSettings {
         }
 
         Ok(Self {
-            enable_runtimes: true,
             inline_completions: InlineCompletionSettings {
                 provider: if let Some(provider) = inline_completion_provider {
                     provider

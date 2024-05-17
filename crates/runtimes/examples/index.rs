@@ -15,16 +15,17 @@ fn main() {
         let store = SettingsStore::test(cx);
         cx.set_global(store);
         language::init(cx);
-        Project::init_settings(cx);
-        SettingsStore::update(cx, |store, cx| {
-            store.update_user_settings::<AllLanguageSettings>(cx, |_| {});
-        });
-
         let clock = Arc::new(FakeSystemClock::default());
         let http = Arc::new(HttpClientWithUrl::new("http://localhost:11434", None));
 
         let client = client::Client::new(clock, http.clone(), cx);
         Client::set_global(client.clone(), cx);
+
+        runtimes::init(client, cx);
+        Project::init_settings(cx);
+        SettingsStore::update(cx, |store, cx| {
+            store.update_user_settings::<AllLanguageSettings>(cx, |_| {});
+        });
 
         let args: Vec<String> = std::env::args().collect();
         if args.len() < 2 {
