@@ -8446,6 +8446,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtimes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "client",
+ "clock",
+ "collections",
+ "editor",
+ "env_logger",
+ "futures 0.3.28",
+ "gpui",
+ "http 0.1.0",
+ "language",
+ "languages",
+ "log",
+ "postage",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "theme",
+ "ui",
+ "util",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
