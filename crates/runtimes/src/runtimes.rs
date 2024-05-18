@@ -91,7 +91,7 @@ struct ExecutionRequest {
 
 pub struct RuntimeManager {
     execution_request_tx: mpsc::UnboundedSender<ExecutionRequest>,
-    _runtime_handle: std::thread::JoinHandle<()>,
+    _runtime_handle: std::thread::JoinHandle<anyhow::Result<()>>,
 }
 
 // For now, we're going to connect to a running kernel that is already running
@@ -120,98 +120,83 @@ struct ExecutionUpdate {
 }
 
 // Associates execution IDs with outputs and other messages
-#[derive(Clone)]
 struct DocumentClient {
-    iopub: Arc<tokio::sync::Mutex<ClientIoPubConnection>>,
-    shell: Arc<tokio::sync::Mutex<ClientShellConnection>>,
+    iopub_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    shell_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
     executions:
         Arc<tokio::sync::Mutex<HashMap<ExecutionId, mpsc::UnboundedSender<ExecutionUpdate>>>>,
 }
 
-async fn consume_iopub(document_client: DocumentClient) -> Result<()> {
-    loop {
-        let mut iopub = document_client.iopub.lock().await;
-
-        let message = iopub.read().await?;
-        // We should be the only one using iopub, but we don't have to keep it locked
-        drop(iopub);
-
-        if let Some(parent_header) = message.parent_header {
-            let execution_id = ExecutionId::from(parent_header.msg_id);
-
-            if let Some(mut execution) = document_client.executions.lock().await.get(&execution_id)
-            {
-                execution
-                    .send(ExecutionUpdate {
-                        execution_id,
-                        update: message.content,
-                    })
-                    .await
-                    .ok();
-            }
-        }
-    }
-}
-
-// Intended for Tokio land
 impl DocumentClient {
-    async fn new(kernel_path: &PathBuf) -> Result<Self> {
+    async fn new(
+        kernel_path: &PathBuf,
+        mut execution_request_rx: mpsc::UnboundedReceiver<ExecutionRequest>,
+    ) -> Result<Self> {
         let connection_info = runtimelib::ConnectionInfo::from_path(kernel_path).await?;
 
-        let iopub = connection_info.create_client_iopub_connection("").await?;
+        let mut iopub = connection_info.create_client_iopub_connection("").await?;
+        let mut shell = connection_info.create_client_shell_connection().await?;
 
-        let shell = connection_info.create_client_shell_connection().await?;
+        let executions: Arc<
+            tokio::sync::Mutex<HashMap<ExecutionId, mpsc::UnboundedSender<ExecutionUpdate>>>,
+        > = Default::default();
 
-        let document_client = Self {
-            iopub: Arc::new(tokio::sync::Mutex::new(iopub)),
-            shell: Arc::new(tokio::sync::Mutex::new(shell)),
-            executions: Default::default(),
-        };
-
-        tokio::spawn({
-            let document_client = document_client.clone();
+        let iopub_handle = tokio::spawn({
+            let executions = executions.clone();
             async move {
-                consume_iopub(document_client)
-                    .await
-                    .expect("Failed to consume iopub");
+                loop {
+                    let message = iopub.read().await?;
+                    dbg!(&message);
+
+                    if let Some(parent_header) = message.parent_header {
+                        let execution_id = ExecutionId::from(parent_header.msg_id);
+
+                        if let Some(mut execution) = executions.lock().await.get(&execution_id) {
+                            dbg!("Got that update, brah");
+                            execution
+                                .send(ExecutionUpdate {
+                                    execution_id,
+                                    update: message.content,
+                                })
+                                .await
+                                .ok();
+                        }
+                    }
+                }
+
+                // anyhow::Ok(())
             }
         });
 
+        let shell_handle = tokio::spawn({
+            let executions = executions.clone();
+            async move {
+                while let Some(execution) = execution_request_rx.next().await {
+                    let mut message: JupyterMessage = execution.request.into();
+                    message.header.msg_id = execution.execution_id.0.clone();
+                    dbg!(&message);
+
+                    executions
+                        .lock()
+                        .await
+                        .insert(execution.execution_id, execution.response_sender);
+
+                    shell
+                        .send(message)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to send execute request: {e:?}"))?;
+                }
+                anyhow::Ok(())
+            }
+        });
+
+        let document_client = Self {
+            iopub_handle,
+            shell_handle,
+            executions: Default::default(),
+        };
+
         Ok(document_client)
-    }
-
-    async fn start(
-        &mut self,
-        mut execution_request_rx: mpsc::UnboundedReceiver<ExecutionRequest>,
-    ) -> Result<()> {
-        dbg!("Started our execution listener");
-        while let Some(request) = execution_request_rx.next().await {
-            dbg!("Got request");
-            self.execute(request).await?;
-            dbg!("Handled request");
-        }
-
-        Ok(())
-    }
-
-    async fn execute(&mut self, execution: ExecutionRequest) -> Result<()> {
-        dbg!(&execution);
-        let mut message: JupyterMessage = execution.request.into();
-        message.header.msg_id = execution.execution_id.0.clone();
-
-        self.executions
-            .lock()
-            .await
-            .insert(execution.execution_id, execution.response_sender);
-
-        self.shell
-            .lock()
-            .await
-            .send(message)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send execute request: {e:?}"))?;
-
-        Ok(())
     }
 }
 
@@ -225,20 +210,23 @@ impl RuntimeManager {
                 .build()
                 .expect("tokio failed to start");
 
+            // TODO: Will need a signal handler to shutdown the runtime
             runtime.block_on(async move {
                 // Set up the kernel client here as our prototype
                 let kernel_path = std::path::PathBuf::from(HARDCODED_KERNEL);
-                let mut document_client = DocumentClient::new(&kernel_path).await.unwrap();
+                let document_client = DocumentClient::new(&kernel_path, execution_request_rx)
+                    .await
+                    .unwrap();
 
-                tokio::spawn(async move {
-                    document_client
-                        .start(execution_request_rx)
-                        .await
-                        .expect("Failed to start kernel");
-                })
-                .await
-                .expect("tokio spawn failed");
-            });
+                dbg!("We made the client!");
+                let join_fut = futures::future::try_join(
+                    document_client.iopub_handle,
+                    document_client.shell_handle,
+                );
+
+                join_fut.await?;
+                Ok(())
+            })
         });
         Self {
             execution_request_tx,
