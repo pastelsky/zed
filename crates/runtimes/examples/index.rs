@@ -21,7 +21,7 @@ fn main() {
         let client = client::Client::new(clock, http.clone(), cx);
         Client::set_global(client.clone(), cx);
 
-        runtimes::init(client, cx);
+        runtimes::init(cx);
         Project::init_settings(cx);
         SettingsStore::update(cx, |store, cx| {
             store.update_user_settings::<AllLanguageSettings>(cx, |_| {});
